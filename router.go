@@ -1,26 +1,22 @@
 package routers
 
 import (
+	"baseadmin/src/controllers"
 	"errors"
 	"fmt"
-	"github.com/asktop/gotools/afile"
-	"github.com/asktop/gotools/ajson"
-	"github.com/asktop/gotools/akey"
-	"github.com/wxnacy/wgo/arrays"
+	"git.9885.net/lib/go/common/tools/afile"
+	"git.9885.net/lib/go/common/tools/ajson"
+	"git.9885.net/lib/go/common/tools/akey"
+	"github.com/astaxie/beego"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
-)
-
-const (
-	//生成路由文件的前缀名称
-	ROUTER_PREFIX         = "commentsRouter_"
-	//项目url的统一前缀
-	PROJECT_ROUTER_PREFIX = "/v1"
-	//源码相对于根目录的存放位置
-	PROJECT_SOURCE_CATALOG = "src"
 )
 
 func init() {
@@ -29,7 +25,23 @@ func init() {
 		panic(err)
 	}
 	fmt.Println("generate routers")
+
+	beego.Router("/", &controllers.MainController{})
 }
+
+const (
+	//生成路由文件的前缀名称
+	ROUTER_PREFIX = "commentsRouter_"
+	//项目url的统一前缀
+	PROJECT_ROUTER_PREFIX = "/v1"
+	//源码相对于根目录的存放位置
+	PROJECT_SOURCE_CATALOG = "src"
+	//项目固定的名称（因想直接修改项目文件夹名称，不去修改go.mod 而项目能正常运行）
+	PEOJECT_NAME = "baseadmin"
+)
+
+var routeRegex = regexp.MustCompile(`@router\s+(\S+)(?:\s+\[(\S+)\])?`)
+var actionRegex = regexp.MustCompile(`@action\s+(\S*)`)
 
 func generateRouter() error {
 	//路径是否存在
@@ -53,6 +65,10 @@ func generateRouter() error {
 	deleteRouter(path)
 
 	for _, action := range actions {
+		//如果action router为空，并且mentods为空则跳过
+		if action == nil || action.Methods == nil || len(action.Methods) == 0 {
+			continue
+		}
 		//路由代码
 		code := getRouterCode(action)
 		//文件名称
@@ -68,6 +84,11 @@ func generateRouter() error {
 
 //获取路由代码
 func getRouterCode(action *Action) string {
+	//处理替换项目名称，固定为指定的名称
+	tmp := strings.Split(action.Path, "/")
+	tmp[0] = PEOJECT_NAME
+	action.Path = strings.Join(tmp, "/")
+
 	body := "package routers"
 	body += "\n\n"
 	body += "import (\n"
@@ -80,7 +101,7 @@ func getRouterCode(action *Action) string {
 	controllers := "&" + action.Package + "." + action.ControllerName + "{}"
 	for _, method := range action.Methods {
 		router := PROJECT_ROUTER_PREFIX + action.Router + method.Router
-		body += "\tbeego.Router(\"" + router + "\"," + controllers + ",\"" + method.Method + ":" + method.FuncName + "\")\n";
+		body += "\tbeego.Router(\"" + router + "\", " + controllers + ", \"" + method.Method + ":" + method.FuncName + "\")\n";
 	}
 	body += "}"
 	return body
@@ -89,7 +110,6 @@ func getRouterCode(action *Action) string {
 //路由文件是否更改
 func hasChanged(actions []*Action) bool {
 	original := ajson.Encode(actions)
-	fmt.Println(original)
 	var old_md5 string
 	path := filepath.Join(getProjectPath(), "routers.tmp")
 	if afile.IsExist(path) {
@@ -116,37 +136,24 @@ func deleteRouter(dir string) {
 //扫描目录，获取注解
 func getActions() ([]*Action, error) {
 	projectPath := getProjectPath()
-	controllersPath := filepath.Join(projectPath, PROJECT_SOURCE_CATALOG, "controllers")
-	if !afile.IsExist(controllersPath) {
+	pkgRealpath := filepath.Join(projectPath, PROJECT_SOURCE_CATALOG, "controllers")
+	if !afile.IsExist(pkgRealpath) {
 		panic("controllers dir is not exists")
 	}
-	//获取project目录
-	rootPath := filepath.Dir(projectPath)
 	var actions []*Action
-	err := filepath.Walk(controllersPath, func(path string, info os.FileInfo, err error) error {
-		if info.IsDir() {
-			return nil
-		}
-		//读取文件获取注解@action
-		action, err := getAction(path)
+	//获取所有要扫描的包路径
+	dirs := getScanDirPath(pkgRealpath)
+	for _, dir := range dirs {
+		//获取包路径
+		pkgpath := getPkgpath(dir)
+		tmp, err := parsePkg(dir, pkgpath)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if action == nil {
-			return nil
-		}
-		//处理import地址
-		path = strings.ReplaceAll(path, rootPath, "")
-		path = strings.ReplaceAll(path, info.Name(), "")
-		if strings.Contains(path, "\\") {
-			path = strings.ReplaceAll(path, "\\", "/")
-		}
-		path = strings.Trim(path, "/")
-		action.Path = path
-		actions = append(actions, action)
-		return nil
-	})
-	return actions, err
+		actions = append(actions, tmp...)
+	}
+
+	return actions, nil
 }
 
 func getProjectPath() string {
@@ -154,10 +161,32 @@ func getProjectPath() string {
 	return dir
 }
 
+func getPkgpath(pkgRealpath string) string {
+	//获取project目录
+	rootPath := filepath.Dir(getProjectPath())
+	rootPath = filepath.Join(rootPath, "\\")
+	tmp := strings.ReplaceAll(pkgRealpath, rootPath, "")
+	if strings.Contains(tmp, "\\") {
+		tmp = strings.ReplaceAll(tmp, "\\", "/")
+	}
+	if strings.HasPrefix(tmp, "/") {
+		tmp = strings.TrimLeft(tmp, "/")
+	}
+	return tmp
+}
+
+//获取需要扫描的所有包路径
+func getScanDirPath(controllersPath string) []string {
+	dirNames, _, _ := afile.GetNames(controllersPath)
+	for i, dir := range dirNames {
+		dirNames[i] = filepath.Join(controllersPath, dir)
+	}
+	dirNames = append(dirNames, controllersPath)
+	return dirNames
+}
+
 //扫描单个文件
 func getAction(path string) (*Action, error) {
-	//增加标识，如果文件不含注解@action,跳过
-	isAction := false
 	//读取文件
 	data, err := ioutil.ReadFile(path)
 	if err != nil {
@@ -165,7 +194,7 @@ func getAction(path string) (*Action, error) {
 	}
 	lines := strings.Split(string(data), "\n")
 	action := &Action{}
-	for i, line := range lines {
+	for _, line := range lines {
 		//获取包名
 		t := strings.TrimSpace(line)
 		if strings.HasPrefix(t, "package") {
@@ -176,108 +205,16 @@ func getAction(path string) (*Action, error) {
 		//获取action注解
 		t = strings.TrimSpace(strings.TrimLeft(line, "//"))
 		if strings.HasPrefix(t, "@action") {
-			dataList := split(t)
-			if len(dataList) != 2 && len(dataList) != 1 {
+			matches := actionRegex.FindStringSubmatch(t)
+			if len(matches) == 2 {
+				action.Router = matches[1]
+			} else {
 				return nil, errors.New("action annotate is error in file " + path)
 			}
-			if len(dataList) == 1 {
-				action.Router = ""
-			} else {
-				action.Router = dataList[1]
-			}
-
-			isAction = true
-
-			//获取controller名
-			t = strings.TrimSpace(lines[i+1])
-			if strings.HasPrefix(t, "type") {
-				datas := split(t)
-				if len(datas) != 4 {
-					return nil, errors.New("action annotate is error in file " + path)
-				}
-				action.ControllerName = datas[1]
-				continue
-			}
-		}
-
-		//获取controller名
-		if strings.HasPrefix(t, "type") {
-			datas := split(t)
-			if len(datas) != 4 {
-				return nil, errors.New("action annotate is error in file " + path)
-			}
-			action.ControllerName = datas[1]
-			continue
-		}
-
-		//获取router注解
-		if strings.HasPrefix(t, "@router") {
-			datas := split(t)
-			datas = removeSpace(datas)
-			if len(datas) != 3 {
-				return nil, errors.New("router annotate is error in file " + path)
-			}
-			router := &Router{}
-			router.Router = datas[1]
-			method := datas[2]
-			method = strings.ReplaceAll(method, "[", "")
-			method = strings.ReplaceAll(method, "]", "")
-			router.Method = method
-
-			//获取methodName
-			sl := lines[i+1]
-			if strings.HasPrefix(sl, "func") {
-				data := split(sl)
-				data = removeSpace(data)
-				if len(data) != 5 {
-					return nil, errors.New("router annotate is error in file " + path)
-				}
-				funName := data[3]
-				if strings.Contains(funName, "(") {
-					funName = strings.ReplaceAll(funName, "(", "")
-					funName = strings.ReplaceAll(funName, ")", "")
-				}
-				router.FuncName = funName
-			}
-			action.Methods = append(action.Methods, router)
+			return action, nil
 		}
 	}
-	if isAction {
-		return action, nil
-	}
-	return nil, nil
-}
-
-func removeSpace(str []string) []string {
-	str = arrays.StringsDeduplicate(str)
-	i := arrays.ContainsString(str, " ")
-	if i > -1 {
-		str = append(str[:i], str[i+1:]...)
-	}
-	k := arrays.ContainsString(str, "")
-	if k > -1 {
-		str = append(str[:k], str[k+1:]...)
-	}
-	return str
-}
-
-func split(str string) []string {
-	arr := strings.Split(str, " ")
-	if len(arr) < 2 {
-		arr = strings.Split(str, "\t")
-	} else {
-		rst := []string{}
-		for _, s := range arr {
-			if strings.Contains(s, "\t") {
-				tmpArr := strings.Split(s, "\t")
-				rst = append(rst, tmpArr...)
-			} else {
-				rst = append(rst, s)
-			}
-		}
-		arr = rst
-	}
-	return arr
+	return action, nil
 }
 
 type Action struct {
@@ -291,4 +228,79 @@ type Router struct {
 	Method   string
 	Router   string
 	FuncName string
+}
+
+func parsePkg(pkgRealpath, pkgpath string) ([]*Action, error) {
+	var actions []*Action
+	fileSet := token.NewFileSet()
+	astPkgs, err := parser.ParseDir(fileSet, pkgRealpath, func(info os.FileInfo) bool {
+		name := info.Name()
+		return !info.IsDir() && !strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".go")
+	}, parser.ParseComments)
+
+	if err != nil {
+		return nil, err
+	}
+	for _, pkg := range astPkgs {
+		for path, fl := range pkg.Files {
+			action := &Action{}
+			action, err = getAction(path)
+			if err != nil {
+				return nil, err
+			}
+			action.Path = pkgpath
+			//获取action注解信息
+			for _, d := range fl.Decls {
+				switch specDecl := d.(type) {
+				case *ast.FuncDecl:
+					if specDecl.Recv != nil {
+						exp, ok := specDecl.Recv.List[0].Type.(*ast.StarExpr) // Check that the type is correct first beforing throwing to parser
+						if ok {
+							if specDecl.Doc == nil {
+								continue
+							}
+							//获取router注解
+							router, err := getRouter(specDecl.Doc.List)
+							if err != nil {
+								return nil, err
+							}
+							if router == nil {
+								continue
+							}
+							router.FuncName = specDecl.Name.String()
+							//关联到action注解
+							action.ControllerName = fmt.Sprint(exp.X)
+							action.Methods = append(action.Methods, router)
+						}
+					}
+				}
+			}
+			actions = append(actions, action)
+		}
+	}
+	return actions, nil
+}
+
+func getRouter(lines []*ast.Comment) (*Router, error) {
+	for _, c := range lines {
+		router := &Router{}
+		t := strings.TrimSpace(strings.TrimLeft(c.Text, "//"))
+		if strings.HasPrefix(t, "@router") {
+			t := strings.TrimSpace(strings.TrimLeft(c.Text, "//"))
+			matches := routeRegex.FindStringSubmatch(t)
+			if len(matches) == 3 {
+				router.Router = matches[1]
+				methods := matches[2]
+				if methods == "" {
+					router.Method = "get"
+				} else {
+					router.Method = methods
+				}
+				return router, nil
+			} else {
+				return nil, errors.New("Router information is missing")
+			}
+		}
+	}
+	return nil, nil
 }

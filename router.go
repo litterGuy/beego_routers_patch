@@ -177,12 +177,15 @@ func getPkgpath(pkgRealpath string) string {
 
 //获取需要扫描的所有包路径
 func getScanDirPath(controllersPath string) []string {
-	dirNames, _, _ := afile.GetNames(controllersPath)
-	for i, dir := range dirNames {
-		dirNames[i] = filepath.Join(controllersPath, dir)
-	}
-	dirNames = append(dirNames, controllersPath)
-	return dirNames
+	var dirs []string
+	filepath.Walk(controllersPath, func(filePath string, fInfo os.FileInfo, err error) error {
+		if fInfo.IsDir() {
+			dirs = append(dirs, filePath)
+			return nil
+		}
+		return nil
+	})
+	return dirs
 }
 
 //扫描单个文件
